@@ -4,7 +4,6 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import matplotlib.pylab as pylab
-
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils import shuffle
