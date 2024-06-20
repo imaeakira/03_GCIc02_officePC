@@ -7,14 +7,30 @@ import lightgbm as lgbm
 from sklearn.neighbors import NearestNeighbors
 from joblib import Parallel, delayed
 
+import datetime
+import time
+last_time = None  # 前回の時間を保持するグローバル変数
+
+def current_timestamp():
+    # 現在のタイムスタンプを返す関数
+    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+def print_with_timestamp(message):
+    # メッセージの前にタイムスタンプを付けて出力する関数
+    global last_time
+    current_time = time.time()
+    if last_time is not None:
+        elapsed_time = current_time - last_time
+        print(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {message}, 処理時間: {elapsed_time:.2f}秒")
+    else:
+        print(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {message}")
+    last_time = current_time
+
 import sys
 import warnings
-
 warnings.filterwarnings('ignore')
-
 # ログファイルを開く
 log_file = open("C:/Gdrive/data2/results.log", "w")
-
 # 標準出力をログファイルにリダイレクトする
 sys.stdout = log_file
 
@@ -107,26 +123,26 @@ def to_drop(df):
     
     return droped_df
 
-print('dfをone-hot encodingします...')
+print_with_timestamp('dfをone-hot encodingします...')
 df_encoded = one_hot_encoding(df_all)
-print('one-hot encoding完了')
+print_with_timestamp('one-hot encoding完了')
 
-print('主要な特徴量を追加します...')
+print_with_timestamp('主要な特徴量を追加します...')
 added_features_df = to_add_feature(df_encoded)
-print('主要な特徴量追加完了')
+print_with_timestamp('主要な特徴量追加完了')
 
 #通常時、ここの3行はコメントアウト可能（計算が早くなる）
-print('neighbors_target_mean_500を計算して追加します...') 
+print_with_timestamp('neighbors_target_mean_500を計算して追加します...') 
 added_features_df = add_features_parallel(added_features_df) 
-print('neighbors_target_mean_500計算追加完了') 
+print_with_timestamp('neighbors_target_mean_500計算追加完了') 
 
-print('neighbors_target_mean_500を外部ファイルから追加します...')
+print_with_timestamp('neighbors_target_mean_500を外部ファイルから追加します...')
 added_features_df = add_neighbors_target_mean_500(added_features_df)
-print('neighbors_target_mean_500追加完了')
+print_with_timestamp('neighbors_target_mean_500追加完了')
 
-print('不要な特徴量を削除します...')
+print_with_timestamp('不要な特徴量を削除します...')
 all_features_df = to_drop(added_features_df)
-print('特徴量削除完了')
+print_with_timestamp('特徴量削除完了')
 
 assert len(df_all) == len(df_encoded)
 assert len(df_all) == len(added_features_df)
@@ -176,7 +192,9 @@ def fit_lgbm(X, y, cv, params: dict=None, verbose=100):
     print('Full AUC score %.6f' % score) 
     return oof_preds, models
 
+print_with_timestamp('LightGBMで学習を行います...')
 oof, models = fit_lgbm(X, y, cv=cv, params=lgbm_best_param)
+print_with_timestamp('学習完了')
 
 pred = np.array([model.predict_proba(test_x.values)[:, 1] for model in models])
 pred = np.mean(pred, axis=0)
@@ -184,7 +202,9 @@ pred = np.mean(pred, axis=0)
 submission = sample_submission.copy()
 submission['TARGET'] = pred
 
+print_with_timestamp('予測結果を出力します...')
 submission.to_csv('C:/Gdrive/data2/3rd_place_solution.csv', index=False)
+print_with_timestamp('出力完了')
 
 # ログファイルを閉じる
 log_file.close()
