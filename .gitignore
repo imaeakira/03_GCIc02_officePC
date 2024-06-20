@@ -1,5 +1,6 @@
 # .gitignore
 
 env/
+env2/
 *.log
 *.tmp

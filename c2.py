@@ -4,6 +4,20 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
 import lightgbm as lgbm
 
+from sklearn.neighbors import NearestNeighbors
+from joblib import Parallel, delayed
+
+import sys
+import warnings
+
+warnings.filterwarnings('ignore')
+
+# ログファイルを開く
+log_file = open("C:/Gdrive/data2/results.log", "w")
+
+# 標準出力をログファイルにリダイレクトする
+sys.stdout = log_file
+
 train_df = pd.read_csv('C:/Gdrive/data2/train.csv')
 test_df = pd.read_csv('C:/Gdrive/data2/test.csv')
 sample_submission = pd.read_csv('C:/Gdrive/data2/sample_submission.csv')
@@ -16,6 +30,9 @@ def one_hot_encoding(df):
     return return_df
 
 def to_add_feature(df):
+
+    # 異常値を欠損値に（365243 -> np.nan）
+    df['DAYS_EMPLOYED'] = df['DAYS_EMPLOYED'].replace(365243, np.nan)
     
     df['EXT_123_mean'] = (df['EXT_SOURCE_1'] + df['EXT_SOURCE_2'] + df['EXT_SOURCE_3']) / 3
     df['EXT_23_mean'] = (df['EXT_SOURCE_2'] + df['EXT_SOURCE_3']) / 2
@@ -32,7 +49,54 @@ def to_add_feature(df):
     
     df['DAYS_BIRTH_365_OWN_CAR_AGE'] = (df['DAYS_BIRTH'] / 365) - df['OWN_CAR_AGE']
 
-    df['DAYS_EMPLOYED'].replace(365243, np.nan, inplace=True)
+    # Kaggle 1st solution を参考に追加
+
+    # credit_annuity_ratio: AMT_CREDIT / AMT_ANNUITY の比率を計算
+    df['credit_annuity_ratio'] = df['AMT_CREDIT'] / df['AMT_ANNUITY']
+    
+    # credit_goods_price_ratio: AMT_CREDIT / AMT_GOODS_PRICE の比率を計算
+    df['credit_goods_price_ratio'] = df['AMT_CREDIT'] / df['AMT_GOODS_PRICE']
+    
+    # credit_downpayment: AMT_GOODS_PRICE - AMT_CREDIT を計算
+    df['credit_downpayment'] = df['AMT_GOODS_PRICE'] - df['AMT_CREDIT']
+    
+    # AGE_INT: DAYS_BIRTH を年単位の整数値に変換
+    df['AGE_INT'] = (df['DAYS_BIRTH'] / -365).astype(int)
+    
+    # region_id: REGION_RATING_CLIENT をカテゴリカル変数として扱うため、ラベルエンコーディング
+    df['region_id'] = pd.factorize(df['REGION_RATING_CLIENT'])[0]
+
+    return df
+
+
+def add_features_parallel(df, n_neighbors=500):
+    # neighbors_target_mean_500: 各行について、EXT_SOURCE_1, EXT_SOURCE_2, EXT_SOURCE_3, 
+    # credit_annuity_ratio の4つの特徴量を使って最近傍の500件を見つけ、それらのTARGETの平均値を計算
+
+    features = ['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3', 'credit_annuity_ratio']
+    df_neighbors = df[features].fillna(0)
+    
+    nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm='auto').fit(df_neighbors)
+    distances, indices = nbrs.kneighbors(df_neighbors)
+    
+    def get_neighbor_mean(i):
+        return df.loc[df.index[indices[i]]]['TARGET'].mean()
+    
+    neighbor_means = Parallel(n_jobs=-1)(delayed(get_neighbor_mean)(i) for i in range(len(indices)))
+    df['neighbors_target_mean_500'] = neighbor_means
+
+    # SK_ID_CURRとneighbors_target_mean_500の結果をCSVファイルに保存
+    result_df = pd.DataFrame({'SK_ID_CURR': df['SK_ID_CURR'], 'neighbors_target_mean_500': df['neighbors_target_mean_500']})
+    result_df.to_csv('C:/Gdrive/data2/neighbors_target_mean_500.csv', index=False)
+    
+    return df
+
+def add_neighbors_target_mean_500(df):
+    # 保存したCSVファイルを読み込む
+    neighbors_target_mean_500_df = pd.read_csv('C:/Gdrive/data2/neighbors_target_mean_500.csv')
+    
+    # データフレームにneighbors_target_mean_500を追加
+    df = pd.merge(df, neighbors_target_mean_500_df, on='SK_ID_CURR', how='left')
     
     return df
 
@@ -43,9 +107,26 @@ def to_drop(df):
     
     return droped_df
 
+print('dfをone-hot encodingします...')
 df_encoded = one_hot_encoding(df_all)
+print('one-hot encoding完了')
+
+print('主要な特徴量を追加します...')
 added_features_df = to_add_feature(df_encoded)
+print('主要な特徴量追加完了')
+
+#通常時、ここの3行はコメントアウト可能（計算が早くなる）
+print('neighbors_target_mean_500を計算して追加します...') 
+added_features_df = add_features_parallel(added_features_df) 
+print('neighbors_target_mean_500計算追加完了') 
+
+print('neighbors_target_mean_500を外部ファイルから追加します...')
+added_features_df = add_neighbors_target_mean_500(added_features_df)
+print('neighbors_target_mean_500追加完了')
+
+print('不要な特徴量を削除します...')
 all_features_df = to_drop(added_features_df)
+print('特徴量削除完了')
 
 assert len(df_all) == len(df_encoded)
 assert len(df_all) == len(added_features_df)
@@ -104,3 +185,6 @@ submission = sample_submission.copy()
 submission['TARGET'] = pred
 
 submission.to_csv('C:/Gdrive/data2/3rd_place_solution.csv', index=False)
+
+# ログファイルを閉じる
+log_file.close()
