@@ -3,6 +3,8 @@ import pandas as pd
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
 import lightgbm as lgbm
+from lightgbm import early_stopping
+from lightgbm import log_evaluation
 
 from sklearn.neighbors import NearestNeighbors
 from joblib import Parallel, delayed
@@ -281,15 +283,22 @@ def to_drop(df):
     
     return droped_df
 
-lgbm_best_param = {'reg_lambda': 1.1564659040946654,
-                   'reg_alpha': 9.90877329623665, 
-                   'colsample_bytree': 0.5034991685866442, 
-                   'subsample': 0.6055998601661783, 
-                   'max_depth': 3, 
-                   'min_child_weight': 39.72586351155486, 
-                   'learning_rate': 0.08532489659779158, 
-                   'verbose': -1  # LightGBM のログレベルを設定
-                   }
+lgbm_best_param = {
+    'reg_lambda': 1.1564659040946654,
+    'reg_alpha': 9.90877329623665, 
+    'colsample_bytree': 0.5034991685866442, 
+    'subsample': 0.6055998601661783, 
+    'max_depth': 3, 
+    'min_child_weight': 39.72586351155486, 
+    'learning_rate': 0.08532489659779158, 
+    'verbose': -1,
+    'device': 'gpu',
+    'gpu_platform_id': 0,
+    'gpu_device_id': 0,
+    'objective': 'binary',
+    'boost_from_average': True,
+    'force_col_wise': True
+}
 
 def fit_lgbm(X, y, cv, params: dict=None, verbose=100):
     oof_preds = np.zeros(X.shape[0])
@@ -315,6 +324,14 @@ def fit_lgbm(X, y, cv, params: dict=None, verbose=100):
     print('Full AUC score %.6f' % score) 
     return oof_preds, models
 
+def check_gpu_availability():
+    try:
+        lgbm.Dataset(None).construct()
+    except lgbm.basic.LightGBMError as err:
+        print(f"LightGBM Error: {err}")
+    else:
+        print("GPU is available for LightGBM.")
+
 def fit_lgbm_gpu(X, y, cv, params: dict=None, verbose=100):
     oof_preds = np.zeros(X.shape[0])
     if params is None: params = {}
@@ -326,14 +343,21 @@ def fit_lgbm_gpu(X, y, cv, params: dict=None, verbose=100):
         train_dataset = lgbm.Dataset(x_train, label=y_train)
         valid_dataset = lgbm.Dataset(x_valid, label=y_valid)
         
-        clf = lgbm.train(params, train_dataset,
-                         valid_sets=[train_dataset, valid_dataset], 
-                         #verbose_eval=verbose,
-                         #early_stopping_rounds=200
-                         )
+        # Ensure GPU usage
+        params['device'] = 'gpu'
+        params['gpu_platform_id'] = 0
+        params['gpu_device_id'] = 0
+        
+        clf = lgbm.train(
+            params, 
+            train_dataset,
+            num_boost_round=10000,
+            valid_sets=[train_dataset, valid_dataset],
+            callbacks=[lgbm.early_stopping(100), lgbm.log_evaluation(verbose)]
+        )
         
         models.append(clf)
-        oof_preds[idx_valid] = clf.predict(x_valid, num_iteration=clf.best_iteration)
+        oof_preds[idx_valid] = clf.predict(x_valid)
         print('Fold %2d AUC : %.6f' % (i + 1, roc_auc_score(y_valid, oof_preds[idx_valid])))
     
     score = roc_auc_score(y, oof_preds)
@@ -363,9 +387,9 @@ added_features_df = to_add_feature(df_encoded)
 print_with_timestamp('主要な特徴量追加完了')
 
 #新規特徴量が無い時は、ここ3行はコメントアウト可能（計算が早くなる）
-print_with_timestamp('neighbors_target_mean_500を計算して追加します...') 
-added_features_df = add_features_parallel(added_features_df) 
-print_with_timestamp('neighbors_target_mean_500計算追加完了') 
+# print_with_timestamp('neighbors_target_mean_500を計算して追加します...') 
+# added_features_df = add_features_parallel(added_features_df) 
+# print_with_timestamp('neighbors_target_mean_500計算追加完了') 
 
 print_with_timestamp('neighbors_target_mean_500を外部ファイルから追加します...')
 added_features_df = add_neighbors_target_mean_500(added_features_df)
@@ -400,11 +424,13 @@ y = train_y.values
 fold = StratifiedKFold(n_splits=8, shuffle=True, random_state=69)
 cv = list(fold.split(X, y))
 
+# メインの予測部分
 print_with_timestamp('LightGBMで学習を行います...')
-oof, models = fit_lgbm(X, y, cv=cv, params=lgbm_best_param)
+check_gpu_availability()
+oof, models = fit_lgbm_gpu(X, y, cv=cv, params=lgbm_best_param)
 print_with_timestamp('学習完了')
 
-pred = np.array([model.predict_proba(test_x.values)[:, 1] for model in models])
+pred = np.array([model.predict(test_x.values) for model in models])  # Changed from predict_proba to predict
 pred = np.mean(pred, axis=0)
 
 submission = sample_submission.copy()
