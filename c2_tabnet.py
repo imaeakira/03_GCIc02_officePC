@@ -12,9 +12,14 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import Pool, cpu_count
 import psutil
 
+import os
 import datetime
 import time
 last_time = None  # 前回の時間を保持するグローバル変数
+
+# グローバル変数の設定
+SKIP_PREPROCESSING = True  # Trueに変更すると前処理をスキップします
+DATA_DIR = 'C:/Gdrive/data2/'
 
 def current_timestamp():
     # 現在のタイムスタンプを返す関数
@@ -30,6 +35,51 @@ def print_with_timestamp(message):
     else:
         print(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {message}")
     last_time = current_time
+
+def load_preprocessed_data():
+    print_with_timestamp('前処理済みデータを読み込みます...')
+    train = pd.read_csv(os.path.join(DATA_DIR, 'train_processed_nn.csv'))
+    test = pd.read_csv(os.path.join(DATA_DIR, 'test_processed_nn.csv'))
+    print_with_timestamp('前処理済みデータの読み込み完了')
+    return train, test
+
+def preprocess_data():
+    print_with_timestamp("データの読み込みと前処理を開始します...")
+    train = pd.read_csv(os.path.join(DATA_DIR, 'train_processed.csv'))
+    test = pd.read_csv(os.path.join(DATA_DIR, 'test_processed.csv'))
+    df_all = pd.concat([train, test], axis=0, sort=False)
+    print("Initial df_all shape:", df_all.shape)
+
+    # 完全に欠損している列を削除
+    df_all = remove_all_nan_columns(df_all)
+    print("After removing all-NaN columns - df_all shape:", df_all.shape)
+
+    # 外れ値の処理
+    print_with_timestamp("Optimizing outliers...")
+    df_all = optimize_outliers(df_all)
+    print("After outlier treatment - df_all shape:", df_all.shape)
+
+    # 欠損値の補完
+    print_with_timestamp("Improving missing values...")
+    df_all = improve_missing_values(df_all)
+    print("After missing value imputation - df_all shape:", df_all.shape)
+
+    # bool型をint型に変換
+    print_with_timestamp("Converting bool to int...")
+    df_all = convert_bool_to_int(df_all)
+    print("After converting bool to int - df_all shape:", df_all.shape)
+
+    # trainとtestに分割
+    train = df_all[df_all['TARGET'].notna()].copy()
+    test = df_all[df_all['TARGET'].isna()].copy()
+
+    # データの保存
+    print_with_timestamp("Saving processed data...")
+    train.to_csv(os.path.join(DATA_DIR, 'train_processed_nn.csv'), index=False)
+    test.to_csv(os.path.join(DATA_DIR, 'test_processed_nn.csv'), index=False)
+
+
+    return train, test
 
 import sys
 import warnings
@@ -135,48 +185,17 @@ def convert_bool_to_int(df):
         df[col] = df[col].astype(int)
     return df
 
-if __name__ == '__main__':
+def main():
     # ログファイルを初期化
     with open("C:/Gdrive/data2/results_tabnet.log", "w") as f:
         pass
-
     # 標準出力をログファイルにリダイレクト（追記）しながら、ターミナルにも出力する
     sys.stdout = DualLogger("C:/Gdrive/data2/results_tabnet.log", sys.stdout)
 
-    # データの読み込みと前処理
-    print_with_timestamp("Loading data...")
-    train = pd.read_csv('C:/Gdrive/data2/train_processed.csv')
-    test = pd.read_csv('C:/Gdrive/data2/test_processed.csv')
-    df_all = pd.concat([train, test], axis=0, sort=False)
-    print("Initial df_all shape:", df_all.shape)
-
-    # 完全に欠損している列を削除
-    df_all = remove_all_nan_columns(df_all)
-    print("After removing all-NaN columns - df_all shape:", df_all.shape)
-
-    # 外れ値の処理
-    print_with_timestamp("Optimizing outliers...")
-    df_all = optimize_outliers(df_all)
-    print("After outlier treatment - df_all shape:", df_all.shape)
-
-    # 欠損値の補完
-    print_with_timestamp("Improving missing values...")
-    df_all = improve_missing_values(df_all)
-    print("After missing value imputation - df_all shape:", df_all.shape)
-
-    # bool型をint型に変換
-    print_with_timestamp("Converting bool to int...")
-    df_all = convert_bool_to_int(df_all)
-    print("After converting bool to int - df_all shape:", df_all.shape)
-
-    # trainとtestに分割
-    train = df_all[df_all['TARGET'].notna()].copy()
-    test = df_all[df_all['TARGET'].isna()].copy()
-
-    # データの保存★
-    print_with_timestamp("Saving processed data...")
-    train.to_csv('C:/Gdrive/data2/train_processed_nn.csv', index=False)
-    test.to_csv('C:/Gdrive/data2/test_processed_nn.csv', index=False)
+    if SKIP_PREPROCESSING:
+        train, test = load_preprocessed_data()
+    else:
+        train, test = preprocess_data()
 
     # 特徴量とターゲットの分離
     print_with_timestamp("Separating features and target...")
@@ -247,6 +266,5 @@ if __name__ == '__main__':
     submission.to_csv('C:/Gdrive/data2/submission_tabnet.csv', index=False)
     print("Submission file created: submission_tabnet.csv")
 
-    # 削除された列の数を出力
-    print(f"Number of columns dropped: {len(train.columns) - len(X.columns) - 2}")  # -2 for 'TARGET' and 'SK_ID_CURR'
-
+if __name__ == '__main__':
+    main()
