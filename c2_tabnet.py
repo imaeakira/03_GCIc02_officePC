@@ -1,76 +1,163 @@
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.impute import SimpleImputer
+from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import KNNImputer
+from scipy import stats
 import torch
 from pytorch_tabnet.tab_model import TabNetClassifier
 
-from sklearn.feature_selection import mutual_info_classif
-from scipy.stats import spearmanr
+import datetime
+import time
+last_time = None  # 前回の時間を保持するグローバル変数
 
-from sklearn.model_selection import StratifiedKFold
+def current_timestamp():
+    # 現在のタイムスタンプを返す関数
+    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-def select_features(X, y, n_features=200, correlation_threshold=0.95):
-    # 特徴量の重要度を計算
-    mi_scores = mutual_info_classif(X, y)
-    mi_scores = pd.Series(mi_scores, index=X.columns)
-    mi_scores = mi_scores.sort_values(ascending=False)
+def print_with_timestamp(message):
+    # メッセージの前にタイムスタンプを付けて出力する関数
+    global last_time
+    current_time = time.time()
+    if last_time is not None:
+        elapsed_time = current_time - last_time
+        print(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {message}, 処理時間: {elapsed_time:.2f}秒")
+    else:
+        print(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {message}")
+    last_time = current_time
 
-    # 最も重要な特徴量を選択
-    selected_features = mi_scores.head(n_features).index.tolist()
+import sys
+import warnings
+warnings.filterwarnings('ignore')
+class DualLogger:
+    def __init__(self, filepath, terminal):
+        self.terminal = terminal
+        self.log = open(filepath, "a")  # 追記モードでファイルを開く
 
-    # 相関の高い特徴量を除去
-    X_selected = X[selected_features]
-    corr_matrix = X_selected.corr().abs()
-    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-    to_drop = [column for column in upper.columns if any(upper[column] > correlation_threshold)]
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+
+    def flush(self):
+        # このメソッドは、ファイルやターミナルがフラッシュを必要とする場合に呼ばれます
+        self.terminal.flush()
+        self.log.flush()
+
+    def close(self):
+        # リソースを適切にクリーンアップ
+        self.log.close()
+
+def remove_all_nan_columns(df):
+    return df.dropna(axis=1, how='all')
+
+def optimize_outliers(df):
+    numeric_columns = df.select_dtypes(include=[np.number]).columns.drop(['SK_ID_CURR', 'TARGET'], errors='ignore')
     
-    final_features = [col for col in selected_features if col not in to_drop]
+    # 無限大の値をNaNに置き換える
+    df = df.replace([np.inf, -np.inf], np.nan)
+    
+    for col in numeric_columns:
+        # NaNを無視してZ-scoreを計算
+        z_scores = np.abs(stats.zscore(df[col], nan_policy='omit'))
+        df[col] = df[col].mask(z_scores > 3, df[col].median())
+        
+        # IQRを使用して外れ値を特定
+        Q1 = df[col].quantile(0.25)
+        Q3 = df[col].quantile(0.75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+        df[col] = df[col].clip(lower_bound, upper_bound)
+    
+    # StandardScalerを使用してスケーリング
+    scaler = StandardScaler()
+    df[numeric_columns] = scaler.fit_transform(df[numeric_columns])
+    
+    return df
 
-    print(f"Selected {len(final_features)} features")
-    return final_features
+def improve_missing_values(df):
+    # 'SK_ID_CURR'と'TARGET'列を除外
+    columns_to_exclude = ['SK_ID_CURR', 'TARGET']
+    
+    # 数値列とカテゴリ列を分離
+    numeric_columns = df.select_dtypes(include=[np.number]).columns.drop(columns_to_exclude, errors='ignore')
+    categorical_columns = df.select_dtypes(exclude=[np.number]).columns.drop(columns_to_exclude, errors='ignore')
+    
+    # 数値列の欠損値をKNNImputerで補完
+    imputer = KNNImputer(n_neighbors=5)
+    df_numeric = pd.DataFrame(imputer.fit_transform(df[numeric_columns]), columns=numeric_columns, index=df.index)
+    
+    # カテゴリ列の欠損値を最頻値で補完
+    df_categorical = df[categorical_columns].fillna(df[categorical_columns].mode().iloc[0])
+    
+    # 数値列とカテゴリ列を結合
+    df_imputed = pd.concat([df[columns_to_exclude], df_numeric, df_categorical], axis=1)
+    
+    return df_imputed
 
-# メインの処理
-# データの読み込み
+def convert_bool_to_int(df):
+    bool_columns = df.select_dtypes(include=['bool']).columns
+    for col in bool_columns:
+        df[col] = df[col].astype(int)
+    return df
+
+# ここからmain関数
+# ログファイルを初期化
+with open("C:/Gdrive/data2/results_tabnet.log", "w") as f:
+    pass
+
+# 標準出力をログファイルにリダイレクト（追記）しながら、ターミナルにも出力する
+sys.stdout = DualLogger("C:/Gdrive/data2/results_tabnet.log", sys.stdout)
+
+# データの読み込みと前処理
+print_with_timestamp("Loading data...")
 train = pd.read_csv('C:/Gdrive/data2/train_processed.csv')
 test = pd.read_csv('C:/Gdrive/data2/test_processed.csv')
-
-# 特徴量とターゲットの分離
-X = train.drop(['TARGET', 'SK_ID_CURR'], axis=1)
-y = train['TARGET']
-X_test = test.drop(['SK_ID_CURR'], axis=1)
-
-# 無限大の値をNaNに置き換える
-X = X.replace([np.inf, -np.inf], np.nan)
-X_test = X_test.replace([np.inf, -np.inf], np.nan)
+df_all = pd.concat([train, test], axis=0, sort=False)
+print("Initial df_all shape:", df_all.shape)
 
 # 完全に欠損している列を削除
-X = X.dropna(axis=1, how='all')
-X_test = X_test[X.columns]
+df_all = remove_all_nan_columns(df_all)
+print("After removing all-NaN columns - df_all shape:", df_all.shape)
+
+# 外れ値の処理
+print_with_timestamp("Optimizing outliers...")
+df_all = optimize_outliers(df_all)
+print("After outlier treatment - df_all shape:", df_all.shape)
 
 # 欠損値の補完
-imputer = SimpleImputer(strategy='median')
-X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
-X_test = pd.DataFrame(imputer.transform(X_test), columns=X_test.columns)
+print_with_timestamp("Improving missing values...")
+df_all = improve_missing_values(df_all)
+print("After missing value imputation - df_all shape:", df_all.shape)
 
-# 極端に大きな値や小さな値をクリッピング
-for column in X.columns:
-    lower_bound = X[column].quantile(0.001)
-    upper_bound = X[column].quantile(0.999)
-    X[column] = X[column].clip(lower_bound, upper_bound)
-    X_test[column] = X_test[column].clip(lower_bound, upper_bound)
+# bool型をint型に変換
+print_with_timestamp("Converting bool to int...")
+df_all = convert_bool_to_int(df_all)
+print("After converting bool to int - df_all shape:", df_all.shape)
 
-# 特徴量選択
-selected_features = select_features(X, y, n_features=200, correlation_threshold=0.95)
+# trainとtestに分割
+train = df_all[df_all['TARGET'].notna()].copy()
+test = df_all[df_all['TARGET'].isna()].copy()
 
-# 選択された特徴量のみを使用
-X = X[selected_features]
-X_test = X_test[selected_features]
+# データの保存★
+print_with_timestamp("Saving processed data...")
+train.to_csv('C:/Gdrive/data2/train_processed_nn.csv', index=False)
+test.to_csv('C:/Gdrive/data2/test_processed_nn.csv', index=False)
+
+# 特徴量とターゲットの分離
+print_with_timestamp("Separating features and target...")
+X = train.drop(['TARGET', 'SK_ID_CURR'], axis=1)
+y = train['TARGET']
+X_test = test.drop(['TARGET', 'SK_ID_CURR'], axis=1)
+print("Final X shape:", X.shape)
+print("Final y shape:", y.shape)
+print("Final X_test shape:", X_test.shape)
+print(X.dtypes.value_counts())
 
 # クロスバリデーションの設定
-n_splits = 5
+print_with_timestamp("Setting up cross-validation...")
+n_splits = 10
 skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=69)
 
 # 結果を格納するリスト
@@ -83,11 +170,6 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
     
     X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
     y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
-    
-    # データの標準化
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_val_scaled = scaler.transform(X_val)
     
     # TabNetモデルの定義
     model = TabNetClassifier(
@@ -103,8 +185,8 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
     
     # モデルのトレーニング
     model.fit(
-        X_train=X_train_scaled, y_train=y_train,
-        eval_set=[(X_val_scaled, y_val)],
+        X_train=X_train.values, y_train=y_train.values,
+        eval_set=[(X_val.values, y_val.values)],
         max_epochs=100, patience=10,
         batch_size=1024, virtual_batch_size=128,
         num_workers=0,
@@ -112,11 +194,10 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
     )
     
     # バリデーションデータの予測
-    oof_predictions[val_idx] = model.predict_proba(X_val_scaled)[:, 1]
+    oof_predictions[val_idx] = model.predict_proba(X_val.values)[:, 1]
     
     # テストデータの予測
-    X_test_scaled = scaler.transform(X_test)
-    test_predictions += model.predict_proba(X_test_scaled)[:, 1] / n_splits
+    test_predictions += model.predict_proba(X_test.values)[:, 1] / n_splits
     
     # フォールドのスコアを計算
     fold_score = roc_auc_score(y_val, oof_predictions[val_idx])
@@ -130,8 +211,8 @@ print(f"Average Fold AUC: {np.mean(fold_scores)}")
 
 # 提出用のデータフレーム作成
 submission = pd.DataFrame({'SK_ID_CURR': test['SK_ID_CURR'], 'TARGET': test_predictions})
-submission.to_csv('C:/Gdrive/data2/tabnet_submission.csv', index=False)
-print("Submission file created: tabnet_submission.csv")
+submission.to_csv('C:/Gdrive/data2/submission_tabnet.csv', index=False)
+print("Submission file created: submission_tabnet.csv")
 
 # 削除された列の数を出力
 print(f"Number of columns dropped: {len(train.columns) - len(X.columns) - 2}")  # -2 for 'TARGET' and 'SK_ID_CURR'
