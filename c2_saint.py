@@ -12,7 +12,6 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from multiprocessing import Pool, cpu_count
 import psutil
 
-from sklearn.model_selection import train_test_split
 import optuna
 
 import os
@@ -194,16 +193,16 @@ def objective(trial):
 
     # ハイパーパラメータの探索範囲を定義
     params = {
-        'n_d': trial.suggest_int('n_d', 12, 20),
-        'n_a': trial.suggest_int('n_a', 27, 35),
-        'n_steps': trial.suggest_int('n_steps', 5, 9),
-        'gamma': trial.suggest_float('gamma', 1.1, 1.4),
-        'n_independent': trial.suggest_int('n_independent', 2, 4),
-        'n_shared': trial.suggest_int('n_shared', 3, 5),
-        'lambda_sparse': trial.suggest_float('lambda_sparse', 1e-5, 5e-5, log=True),
-        'momentum': trial.suggest_float('momentum', 0.15, 0.2),
-        'clip_value': trial.suggest_float('clip_value', 0.01, 0.05, log=True),
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.02, log=True),
+        'n_d': trial.suggest_int('n_d', 8, 64),
+        'n_a': trial.suggest_int('n_a', 8, 64),
+        'n_steps': trial.suggest_int('n_steps', 3, 10),
+        'gamma': trial.suggest_float('gamma', 1.0, 2.0),
+        'n_independent': trial.suggest_int('n_independent', 1, 5),
+        'n_shared': trial.suggest_int('n_shared', 1, 5),
+        'lambda_sparse': trial.suggest_float('lambda_sparse', 1e-6, 1e-3, log=True),
+        'momentum': trial.suggest_float('momentum', 0.01, 0.4),
+        'clip_value': trial.suggest_float('clip_value', 0.01, 10.0, log=True),
+        'learning_rate': trial.suggest_float('learning_rate', 1e-3, 1e-1, log=True),
     }
 
     # クロスバリデーションの設定
@@ -281,7 +280,7 @@ def main():
 
     # Optunaの設定
     study = optuna.create_study(direction='maximize', pruner=optuna.pruners.MedianPruner())
-    study.optimize(objective, n_trials=200, timeout=3600*24)  # 24時間の制限
+    study.optimize(objective, n_trials=100, timeout=3600*8)  # 8時間の制限
 
     print('Number of finished trials:', len(study.trials))
     print('Best trial:')
@@ -311,14 +310,11 @@ def main():
         mask_type='entmax'
     )
 
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
-
     final_model.fit(
-        X_train=X_train.values, y_train=y_train.values,
-        eval_set=[(X_train.values, y_train.values), (X_val.values, y_val.values)],
-        eval_name=['train', 'valid'],
+        X_train=X.values, y_train=y.values,
+        eval_set=[(X.values, y.values)],
         max_epochs=200,
-        patience=10,
+        patience=20,
         batch_size=1024,
         virtual_batch_size=128,
         num_workers=0,
