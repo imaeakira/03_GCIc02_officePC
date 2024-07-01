@@ -54,6 +54,11 @@ def preprocess_data():
     df_all = pd.concat([train, test], axis=0, sort=False)
     print("Initial df_all shape:", df_all.shape)
 
+    # user_target_mean カラムを削除（欠損値多数で補完困難）
+    if 'user_target_mean' in df_all.columns:
+        df_all = df_all.drop('user_target_mean', axis=1)
+        print("Dropped user_target_mean column")
+
     # 完全に欠損している列を削除
     df_all = remove_all_nan_columns(df_all)
     print("After removing all-NaN columns - df_all shape:", df_all.shape)
@@ -81,7 +86,6 @@ def preprocess_data():
     print_with_timestamp("Saving processed data...")
     train.to_csv(os.path.join(DATA_DIR, 'train_processed_nn.csv'), index=False)
     test.to_csv(os.path.join(DATA_DIR, 'test_processed_nn.csv'), index=False)
-
 
     return train, test
 
@@ -144,7 +148,7 @@ def impute_column(args):
         imputed_data = pd.Series(data).fillna(pd.Series(data).mode()[0]).values
     return col, imputed_data
 
-def improve_missing_values(df, batch_size=1000):
+def improve_missing_values(df, batch_size=500):
     columns_to_exclude = ['SK_ID_CURR', 'TARGET']
     id_column = df['SK_ID_CURR'].copy()
     
@@ -154,20 +158,19 @@ def improve_missing_values(df, batch_size=1000):
     all_columns = list(numeric_columns) + list(categorical_columns)
     is_numeric = [True] * len(numeric_columns) + [False] * len(categorical_columns)
     
-    num_cores = max(1, cpu_count() - 1)  # Leave one core free
+    num_cores = max(1, psutil.cpu_count(logical=False) - 1)  # 物理コア数を使用
     print(f"Using {num_cores} CPU cores for parallel processing")
     
-    results = {}
-    with Pool(num_cores) as pool:
+    results = {col: [] for col in all_columns}
+    with ProcessPoolExecutor(max_workers=num_cores) as executor:
         for i in range(0, len(df), batch_size):
             print(f"Processing batch {i//batch_size + 1}/{len(df)//batch_size + 1}")
             batch = df.iloc[i:i+batch_size]
             
-            batch_results = pool.map(impute_column, [(col, batch[col].values, is_num) for col, is_num in zip(all_columns, is_numeric)])
+            futures = [executor.submit(impute_column, (col, batch[col].values, is_num)) for col, is_num in zip(all_columns, is_numeric)]
             
-            for col, imputed_data in batch_results:
-                if col not in results:
-                    results[col] = []
+            for future in as_completed(futures):
+                col, imputed_data = future.result()
                 results[col].extend(imputed_data)
             
             # メモリ使用量をチェック
@@ -175,8 +178,12 @@ def improve_missing_values(df, batch_size=1000):
             if memory_usage > 80:
                 print(f"Warning: High memory usage ({memory_usage}%). Consider reducing batch_size.")
     
+    # 結果をデータフレームに適用
     for col in all_columns:
-        df[col] = results[col]
+        if len(results[col]) == len(df):
+            df[col] = results[col]
+        else:
+            print(f"Warning: Column {col} has {len(results[col])} values, expected {len(df)}. Skipping this column.")
     
     df['SK_ID_CURR'] = id_column
     df = df.set_index('SK_ID_CURR').sort_index().reset_index()
@@ -194,16 +201,18 @@ def objective(trial):
 
     # ハイパーパラメータの探索範囲を定義
     params = {
-        'n_d': trial.suggest_int('n_d', 10, 14),
-        'n_a': trial.suggest_int('n_a', 31, 35),
-        'n_steps': trial.suggest_int('n_steps', 4, 6),
-        'gamma': trial.suggest_float('gamma', 1.2, 1.3),
+        'n_d': trial.suggest_int('n_d', 9, 11),
+        'n_a': trial.suggest_int('n_a', 33, 35),
+        'n_steps': trial.suggest_int('n_steps', 3, 5),
+        'gamma': trial.suggest_float('gamma', 1.28, 1.32),
         'n_independent': trial.suggest_int('n_independent', 3, 5),
         'n_shared': trial.suggest_int('n_shared', 2, 4),
-        'lambda_sparse': trial.suggest_float('lambda_sparse', 1e-5, 2e-5, log=True),
-        'momentum': trial.suggest_float('momentum', 0.18, 0.20),
-        'clip_value': trial.suggest_float('clip_value', 0.01, 0.02, log=True),
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.012, log=True),
+        'lambda_sparse': trial.suggest_float('lambda_sparse', 1e-5, 1.5e-5, log=True),
+        'momentum': trial.suggest_float('momentum', 0.18, 0.19),
+        'clip_value': trial.suggest_float('clip_value', 0.01, 0.015, log=True),
+        'learning_rate': trial.suggest_float('learning_rate', 0.009, 0.012, log=True),
+        'batch_size': trial.suggest_categorical('batch_size', [256, 512, 1024]),
+        'virtual_batch_size': trial.suggest_categorical('virtual_batch_size', [32, 64, 128])
     }
 
     # クロスバリデーションの設定
@@ -228,7 +237,7 @@ def objective(trial):
             clip_value=params['clip_value'],
             optimizer_fn=torch.optim.Adam,
             optimizer_params=dict(lr=params['learning_rate']),
-            scheduler_params={"step_size":10, "gamma":0.9},
+            scheduler_params={"step_size":25, "gamma":0.97},
             scheduler_fn=torch.optim.lr_scheduler.StepLR,
             mask_type='entmax'
         )
@@ -236,10 +245,10 @@ def objective(trial):
         model.fit(
             X_train=X_train.values, y_train=y_train.values,
             eval_set=[(X_val.values, y_val.values)],
-            max_epochs=150,
-            patience=15,
-            batch_size=1024,
-            virtual_batch_size=128,
+            max_epochs=100,
+            patience=10,
+            batch_size=params['batch_size'],
+            virtual_batch_size=params['virtual_batch_size'],
             num_workers=0,
             drop_last=False
         )
@@ -248,7 +257,6 @@ def objective(trial):
         fold_score = roc_auc_score(y_val, y_pred)
         scores.append(fold_score)
 
-        # プルーニング
         trial.report(fold_score, fold)
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
@@ -280,8 +288,10 @@ def main():
     print(X.dtypes.value_counts())
 
     # Optunaの設定
-    study = optuna.create_study(direction='maximize', pruner=optuna.pruners.MedianPruner())
-    study.optimize(objective, n_trials=200, timeout=3600*24)  # 24時間の制限
+    study = optuna.create_study(direction='maximize', 
+                                pruner=optuna.pruners.MedianPruner(),
+                                sampler=optuna.samplers.TPESampler(n_startup_trials=10, n_ei_candidates=24))
+    study.optimize(objective, n_trials=300, timeout=3600*24)  # 24時間の制限
 
     print('Number of finished trials:', len(study.trials))
     print('Best trial:')
@@ -306,21 +316,21 @@ def main():
         clip_value=best_params['clip_value'],
         optimizer_fn=torch.optim.Adam,
         optimizer_params=dict(lr=best_params['learning_rate']),
-        scheduler_params={"step_size":20, "gamma":0.95},
+        scheduler_params={"step_size":25, "gamma":0.97},
         scheduler_fn=torch.optim.lr_scheduler.StepLR,
         mask_type='entmax'
     )
-
+    
     X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
 
     final_model.fit(
         X_train=X_train.values, y_train=y_train.values,
         eval_set=[(X_train.values, y_train.values), (X_val.values, y_val.values)],
         eval_name=['train', 'valid'],
-        max_epochs=200,
-        patience=10,
-        batch_size=512,
-        virtual_batch_size=64,
+        max_epochs=150,
+        patience=15,
+        batch_size=best_params['batch_size'],
+        virtual_batch_size=best_params['virtual_batch_size'],
         num_workers=0,
         drop_last=False
     )
