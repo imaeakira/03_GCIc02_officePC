@@ -21,7 +21,7 @@ import time
 last_time = None  # 前回の時間を保持するグローバル変数
 
 # グローバル変数の設定
-SKIP_PREPROCESSING = True  # Trueに変更すると前処理をスキップします
+SKIP_PREPROCESSING = False  # Trueに変更すると前処理をスキップします
 DATA_DIR = 'C:/Gdrive/data2/'
 global X, y
 
@@ -194,20 +194,20 @@ def objective(trial):
 
     # ハイパーパラメータの探索範囲を定義
     params = {
-        'n_d': trial.suggest_int('n_d', 12, 20),
-        'n_a': trial.suggest_int('n_a', 27, 35),
-        'n_steps': trial.suggest_int('n_steps', 5, 9),
-        'gamma': trial.suggest_float('gamma', 1.1, 1.4),
-        'n_independent': trial.suggest_int('n_independent', 2, 4),
-        'n_shared': trial.suggest_int('n_shared', 3, 5),
-        'lambda_sparse': trial.suggest_float('lambda_sparse', 1e-5, 5e-5, log=True),
-        'momentum': trial.suggest_float('momentum', 0.15, 0.2),
-        'clip_value': trial.suggest_float('clip_value', 0.01, 0.05, log=True),
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.02, log=True),
+        'n_d': trial.suggest_int('n_d', 10, 14),
+        'n_a': trial.suggest_int('n_a', 31, 35),
+        'n_steps': trial.suggest_int('n_steps', 4, 6),
+        'gamma': trial.suggest_float('gamma', 1.2, 1.3),
+        'n_independent': trial.suggest_int('n_independent', 3, 5),
+        'n_shared': trial.suggest_int('n_shared', 2, 4),
+        'lambda_sparse': trial.suggest_float('lambda_sparse', 1e-5, 2e-5, log=True),
+        'momentum': trial.suggest_float('momentum', 0.18, 0.20),
+        'clip_value': trial.suggest_float('clip_value', 0.01, 0.02, log=True),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.012, log=True),
     }
 
     # クロスバリデーションの設定
-    n_splits = 10
+    n_splits = 5
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
 
     scores = []
@@ -236,8 +236,8 @@ def objective(trial):
         model.fit(
             X_train=X_train.values, y_train=y_train.values,
             eval_set=[(X_val.values, y_val.values)],
-            max_epochs=100,
-            patience=10,
+            max_epochs=150,
+            patience=15,
             batch_size=1024,
             virtual_batch_size=128,
             num_workers=0,
@@ -306,7 +306,7 @@ def main():
         clip_value=best_params['clip_value'],
         optimizer_fn=torch.optim.Adam,
         optimizer_params=dict(lr=best_params['learning_rate']),
-        scheduler_params={"step_size":10, "gamma":0.9},
+        scheduler_params={"step_size":20, "gamma":0.95},
         scheduler_fn=torch.optim.lr_scheduler.StepLR,
         mask_type='entmax'
     )
@@ -319,8 +319,8 @@ def main():
         eval_name=['train', 'valid'],
         max_epochs=200,
         patience=10,
-        batch_size=1024,
-        virtual_batch_size=128,
+        batch_size=512,
+        virtual_batch_size=64,
         num_workers=0,
         drop_last=False
     )
